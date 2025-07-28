@@ -1,5 +1,7 @@
 # Ignore everything
 *
+.gitattribute
+.gitignore
 
 # Keep Verilog source files
 !*.v
