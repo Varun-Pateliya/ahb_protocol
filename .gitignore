@@ -7,6 +7,4 @@
 !*.xdc
 
 # Keep git-related files and README
-!.gitignore
-!.gitattributes
 !README.md
