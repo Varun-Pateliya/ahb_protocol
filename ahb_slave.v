@@ -28,8 +28,10 @@ module apb_slave #(
   input [2 : 0] hsize,                  // ahb transfer data width
   input [2 : 0] hburst,                 // ahb burst size
   input [1 : 0] htrans,                 // ahb transfer type
-  input [3 : 0] hprot,                  // ahb protection
+//  input [3 : 0] hprot,                  // ahb protection
   input hready,                         // ahb master ready
+
+  // mastlock needed in multi master
 //  input mastlock,                       // ahb master-lock
   
   output reg hreadyout,                     // ahb slave readyout
@@ -39,24 +41,20 @@ module apb_slave #(
 
 
   // master transfer states
-  localparam IDLE = 2'b00;               // idle state, no transfer
-  localparam IDEAL = 2'b01;              // ideal state
-  localparam BUSY = 2'b01;               // master is busy in transfer
+  localparam IDEAL = 2'b00;              // ideal state, no transfer
+  localparam BUSY = 2'b01;               // master is busy, no transfer
   localparam SEQU = 2'b10;               // transfer sequential 
   localparam NSEQ = 2'b11;               // transfer non-sequential
-  localparam S1 = 2'b01;                 // setup state
-  localparam WRITE = 2'b10;                 // write state
-  localparam READ = 2'b11;                 // read state
 
   // type of data burst
   localparam BST_SING = 3'b000;          // single burst
   localparam BST_INCR = 3'b001;          // incremental burst
-  localparam BST_WRAP4 = 3'b010;        // 4-byte increment 
-  localparam BST_INCR4 = 3'b011;        // 4-byte wrap increment
-  localparam BST_WRAP8 = 3'b100;        // 8-byte increment
-  localparam BST_INCR8 = 3'b101;        // 8-byte wrap increment
-  localparam BST_WRAP16 = 3'b110;       // 16-byte increment
-  localparam BST_INCR16 = 3'b111;       // 16-byte wrap increment
+  localparam BST_WRAP4 = 3'b010;         // 4-byte increment 
+  localparam BST_INCR4 = 3'b011;         // 4-byte wrap increment
+  localparam BST_WRAP8 = 3'b100;         // 8-byte increment
+  localparam BST_INCR8 = 3'b101;         // 8-byte wrap increment
+  localparam BST_WRAP16 = 3'b110;        // 16-byte increment
+  localparam BST_INCR16 = 3'b111;        // 16-byte wrap increment
   
   // transfer byte size
   localparam SIZE_1 = 3'b000;            // transfer 1-byte
@@ -69,169 +67,228 @@ module apb_slave #(
 //  localparam SIZE_64 = 3'b010;           // transfer 64-byte (16-word)
 //  localparam SIZE_128 = 3'b011;          // transfer 128-byte (32-word)
   
-  // busrt type flag
-  reg b_sing;
-  reg b_incr;
-  reg b_wrap4;
-  reg b_incr4;
-  reg b_wrap8;
-  reg b_incr8;
-  reg b_wrap16;
-  reg b_incr16;
-  
-  // data width flag
-  reg size1;
-  reg size2;
-  reg size4;
-//  reg size8;
-//  reg size16;
-//  reg size32;
-//  reg size64;
-//  reg size128;
-  
-  reg [DATA_WIDTH - 1: 0] data_mem [0 : MEM_DEPTH - 1]; 
+  // byte addressable memory
+  reg [7: 0] data_mem [0 : MEM_DEPTH - 1]; 
   
   // to represent present-state and next-state
-  reg [1:0] present_state, next_state;
+  reg [1:0] current_state, next_state;
   reg [ADDR_WIDTH - 1 : 0] current_addr, next_addr;
-  reg count_burst;
+  reg [4:0] burst_count, next_burst_count, total_count;
+  reg [2:0] current_size, next_size;            // current size of data transfer
+  reg [2:0] current_burst, next_burst;
+  reg current_ready, next_ready;
+  reg current_write, next_write;
   
+  // currrent state logic
   always @ (posedge hclk) begin
     if (!hresetn) begin
-      present_state <= IDEAL;
-      next_state <= IDEAL;
+      current_state <= IDEAL;
+      current_size <= 3'b000;
+      current_burst <= 3'b000;
+      current_addr <= 32'h0000_0000;
     end
     else begin
-      present_state <= next_state;
-      next_state <= htrans;
+      current_state <= next_state;
+      current_size <= next_size;
+      current_burst <= next_burst;
+      current_addr <= next_addr;
+      current_ready <= next_ready;
+      current_write <= next_write;
     end
   end
   
-  always @ (posedge hclk) begin
-    hresp = 1'b0;
-    hreadyout = 1'b1;
-    case(present_state)
-        IDEAL : begin
-                  hrdata <= 32'h0000_0000;
+  // next state logic
+  always @(*) begin
+    if(!hresetn) begin
+      next_state  = IDEAL;
+      next_addr   = 0;
+      next_size   = 0;
+      next_burst  = 0;
+      next_ready  = 0;
+      next_write  = 0;
+    end
+    
+    else begin
+      hreadyout <= 1'b1;
+      hresp <= 1'b1;
+      case(current_state)
+        IDEAL : begin 
+                  
+                  next_state <= htrans;
+//                  next_addr <= 32'h0000_0000;
+                  next_burst <= 3'b000;
+                  next_size <= 3'b000;
+//                  burst_count <= 5'b00000;
+                  next_ready <= 1'b0;
+                  next_write <= 1'b0;
                 end
         BUSY  : begin
-                   
+                  next_state <= htrans;
+//                  next_addr <= current_addr;
+                  next_burst <= current_burst;
+                  next_size <= current_size;
+//                  burst_count <= burst_count;
+                  next_write <= current_write;
+                  next_ready <= current_ready;
                 end
-        SEQU  : begin
-                   if(hwrite)
-                     casez({size1, size2, size4})
-                       3'b1?? : begin
-                                  burst_size = 0;
-                                  
-                                  data_mem[current_addr] = hwdata[7:0];
-                                  current_addr <= next_addr;
-                                  case({b_sing, b_incr, b_wrap4, b_incr4, b_wrap8, b_incr8, b_wrap16, b_incr16})
-                                    8'b1???_???? : begin
-                                                     
-                                                   end
-                                    8'b?1??_???? : begin
-                                                     next_addr <= current_addr + 1'b1;
-                                                   end
-                                    8'b??1?_???? : begin
-//                                                     new_addr = haddr + 2'b10;
-                                                   end
-                                    8'b???1_???? : begin
-                                                     next_addr <= current_addr + 3'b100;
-                                                   end
-                                    8'b????_1??? : begin
-//                                                     new_addr = haddr + 4'b1000;
-                                                   end
-                                    8'b????_?1?? : begin
-                                                     next_addr <= current_addr + 4'b1000;
-                                                   end
-                                    8'b????_??1? : begin
-                                                     
-                                                   end
-                                    8'b????_???1 : begin
-                                                     next_addr <= current_addr + 5'b1_0000;
-                                                   end
-                                    default      : begin
-                                                   
-                                                   end
-                                  endcase
-                                end
-                       3'b?1? : begin
-                                  {data_mem[new_addr + 1'b1], data_mem[new_addr]} = hwdata[15:0];
-                                  case()
-                     endcase
-                   else if (!hwrite) begin
-                   
-                   end
+        SEQU  : begin 
+                  if(burst_count != total_count) begin
+                    next_state <= current_state;
+//                    next_addr <= current_addr + 
+//                                (current_size * (total_count - burst_count));
+                    next_burst <= current_burst;
+                    next_size <= current_size;
+//                    burst_count <= burst_count - 1;
+                    next_write <= current_write;
+                    next_ready <= current_ready;
+                  end
+                  else begin
+                    next_state <= htrans;
+//                    next_addr <= haddr;
+                    next_burst <= hburst;
+                    next_size <= hsize;
+//                    burst_count <= hburst - 1;
+                    next_write <= hwrite;
+                    next_ready <= hready;
+                  end
                 end
         NSEQ  : begin
-                    
+                  next_state <= htrans;
+//                  next_addr <= haddr;
+//                  burst_count <= hburst - 1;
+                  next_size <= hsize;
+                  next_burst <= hburst;
+                  next_write <= hwrite;
+                  next_ready <= hready;
                 end
-       default:begin
-                      
-               end
-     endcase
-   end
-   
-   
-   
-   
-   
-   always @ (*) begin
-                case(hsize)
-                  SIZE_1 :  begin
-                              {size1, size2, size4} = 3'b000;
-                            end
-                  SIZE_2 :  begin
-                              {size1, size2, size4} = 3'b001;
-                            end
-                  SIZE_4 :  begin
-                              {size1, size2, size4} = 3'b010;
-                            end
-                  default:  begin
-                              {size1, size2, size4} = 3'b000;
-                            end
-                endcase
-                case(hburst)
-                  BST_SING    : begin
-                                  {b_sing, b_incr, b_wrap4, b_incr4,
-                                   b_wrap8, b_incr8, b_wrap16, b_incr16} = 8'b1000_0000;
-                                end
-                  BST_INCR    : begin
-                                  {b_sing, b_incr, b_wrap4, b_incr4,
-                                   b_wrap8, b_incr8, b_wrap16, b_incr16} = 8'b0100_0000;
-                                end
-                  BST_WRAP4  : begin
-                                  {b_sing, b_incr, b_wrap4, b_incr4,
-                                   b_wrap8, b_incr8, b_wrap16, b_incr16} = 8'b0010_0000;
-                                end
-                  BST_INCR4  : begin
-                                  {b_sing, b_incr, b_wrap4, b_incr4,
-                                   b_wrap8, b_incr8, b_wrap16, b_incr16} = 8'b0001_0000;
-                                end
-                  BST_WRAP8  : begin
-                                  {b_sing, b_incr, b_wrap4, b_incr4,
-                                   b_wrap8, b_incr8, b_wrap16, b_incr16} = 8'b0000_1000;
-                                end
-                  BST_INCR8  : begin
-                                  {b_sing, b_incr, b_wrap4, b_incr4,
-                                   b_wrap8, b_incr8, b_wrap16, b_incr16} = 8'b0000_0100;
-                                end
-                  BST_WRAP16 : begin
-                                  {b_sing, b_incr, b_wrap4, b_incr4,
-                                   b_wrap8, b_incr8, b_wrap16, b_incr16} = 8'b0000_0010;
-                                end
-                  BST_INCR16 : begin
-                                  {b_sing, b_incr, b_wrap4, b_incr4,
-                                   b_wrap8, b_incr8, b_wrap16, b_incr16} = 8'b0000_0001;
-                                end
-                  default     : begin
-                                 {b_sing, b_incr, b_wrap4, b_incr4,
-                                  b_wrap8, b_incr8, b_wrap16, b_incr16} = 8'b1000_0000;
-                                end
-                endcase
-                
-         
+        default:begin
+                  next_state <= IDEAL;
+//                  next_addr <= 32'h0000_0000;
+                  next_size <= 3'b000;
+                  next_burst <= 3'b000;
+//                  burst_count <= 5'b00000;
+                  next_write <= 1'b0;
+                  next_ready <= 1'b0;
+                end
+      endcase
+  end
+  end
 
-  end  
+
+
+
+
+  always@(*) begin
+  case(current_state)
+  IDEAL : begin
+            next_burst_count <= 5'b0_0000;
+          end 
+  NSEQ  : begin
+    case(current_burst)
+      BST_SING    : begin
+                      next_burst_count <= 5'b0_0000;
+                      total_count <= 5'b0_0000;
+                    end
+      BST_INCR    : begin
+                      next_burst_count <= 5'b0_0001;
+                      total_count <= 5'b0_0000;
+                    end
+      BST_WRAP4   : begin
+                      next_burst_count <= 5'b1_1110;
+                      total_count <= 5'b0_0011;
+                    end
+      BST_INCR4   : begin
+                      next_burst_count <= 5'b0_0100;
+                      total_count <= 5'b0_0011;
+                    end
+      BST_WRAP8   : begin
+                      next_burst_count <= 5'b1_1100;
+                      total_count <= 5'b0_0111;
+                    end
+      BST_INCR8   : begin
+                      next_burst_count <= 5'b0_1000;
+                      total_count <= 5'b0_0111;
+                    end
+      BST_WRAP16  : begin
+                      next_burst_count <= 5'b1_1000;
+                      total_count <= 5'b0_1111;
+                    end
+      BST_INCR16  : begin
+                      next_burst_count <= 5'b1_0000;
+                      total_count <= 5'b0_1111;
+                    end
+      default     : begin
+                      next_burst_count <= 5'b0_0000;
+                      total_count <= 5'b0_0000;
+                    end
+                  endcase
+    end
+    BUSY         : begin
+                next_burst_count <= next_burst_count;
+                   end
+    SEQU        : begin
+                    if(current_ready && (burst_count != 0)) begin
+                      if((current_burst == BST_INCR4) || (current_burst == BST_INCR8) || (current_burst == BST_INCR16))
+                      next_burst_count <= burst_count - 1;
+                      next_addr <= current_addr + (burst_count * current_size);
+                    end
+                    else if ((current_burst == BST_WRAP4) || (current_burst == BST_WRAP8) || (current_burst == BST_WRAP16)) begin
+                    if((burst_count/2) < (total/2 + 2))begin
+                      next_burst_count <= burst_count  - (total_count) - 2;
+                      end 
+                      else if()
+                    end
+                  end
+    endcase
+  end
+
+  // read and write logic
+  always @(posedge hclk) begin
+    if (!hready) begin
+      hrdata <= 32'h0000_0000;
+    end
+    else
+    // write logic
+    if(current_ready && ((current_state != BUSY) || (current_state != IDEAL))) begin
+     case(current_write)
+      1'b1:case(current_size)
+            SIZE_1 :  begin
+                        data_mem[current_addr] <= hwdata[7:0];
+                      end
+            SIZE_2 :  begin
+                        {data_mem[current_addr + 1],
+                         data_mem[current_addr]} <= hwdata[15:0];
+                      end
+            SIZE_4 :  begin 
+                        {data_mem[current_addr + 3], 
+                         data_mem[current_addr + 2],
+                         data_mem[current_addr + 1],
+                         data_mem[current_addr]} <= hwdata[31:0];
+                      end
+            default:  ;
+           endcase
+    
+    // read logic
+      1'b0: case(current_size)
+             SIZE_1 : begin
+                        hrdata[7:0] <= data_mem[current_addr];
+                      end
+             SIZE_2 : begin
+                        hrdata[15:0] <= {data_mem[current_addr + 1],
+                                         data_mem[current_addr]};
+                      end
+             SIZE_4 : begin
+                        hrdata[31:0] <= {data_mem[current_addr + 3],
+                                         data_mem[current_addr + 2],
+                                         data_mem[current_addr + 1],
+                                         data_mem[current_addr]};
+                      end
+             default: begin
+                        hrdata <= 32'h0000_0000;
+                      end
+            endcase
+      endcase
+    end
+  end
 
 endmodule
